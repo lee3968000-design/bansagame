@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>반사게임 : 스피드 챌린지 (RTDB)</title>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
+    
+    <style>
+        /* 스타일은 이전과 100% 동일합니다 */
+        :root { --cell-size: 45px; --bg-color: #2c3e50; --board-bg: #ecf0f1; }
+        body { font-family: 'Malgun Gothic', sans-serif; background-color: var(--bg-color); color: white; display: flex; flex-direction: column; align-items: center; margin: 0; padding: 20px; }
+        
+        .top-bar { display: flex; gap: 10px; margin-bottom: 20px; background: rgba(0,0,0,0.2); padding: 15px; border-radius: 10px; align-items: center; }
+        input[type="number"] { width: 60px; padding: 10px; font-size: 16px; border-radius: 5px; border: none; text-align: center; }
+        input[type="text"] { width: 120px; padding: 10px; font-size: 14px; border-radius: 5px; border: none; }
+        
+        .game-container { display: flex; gap: 20px; align-items: flex-start; }
+        .board-wrapper { position: relative; background: var(--board-bg); padding: 10px; border-radius: 10px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); }
+        #game-board { display: grid; grid-template-columns: repeat(12, var(--cell-size)); grid-template-rows: repeat(12, var(--cell-size)); gap: 1px; background: #95a5a6; border: 5px solid #34495e; }
+        
+        .cell { background: white; width: var(--cell-size); height: var(--cell-size); display: flex; justify-content: center; align-items: center; position: relative; font-weight: bold; font-size: 14px; color: #333; user-select: none; }
+        .cell.border { background: #dfe6e9; color: #7f8c8d; cursor: pointer; transition: 0.2s; }
+        .cell.border:hover { background: #b2bec3; }
+        .cell.border.selected { background: #2ecc71; color: white; }
+        .cell.border.answer-correct { background: #f1c40f !important; color: black; border: 2px solid #e67e22; }
+        .cell.corner { background: #34495e; }
+        
+        .mirror-line { stroke-width: 4; stroke-linecap: round; }
+        .mirror-red { stroke: #e74c3c; }
+        .mirror-blue { stroke: #3498db; }
+        .bulb { font-size: 24px; filter: drop-shadow(0 0 5px #f1c40f); cursor: default; }
+        
+        #light-layer { position: absolute; top: 10px; left: 10px; pointer-events: none; width: calc(var(--cell-size) * 12 + 11px); height: calc(var(--cell-size) * 12 + 11px); z-index: 10; }
+        .beam { stroke: #f1c40f; stroke-width: 3; stroke-linecap: round; stroke-opacity: 0.8; fill: none; }
+
+        .panel { background: rgba(255,255,255,0.1); padding: 20px; border-radius: 10px; width: 300px; }
+        button { background: #3498db; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; font-size: 16px; margin-bottom: 5px; transition: 0.2s; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: #7f8c8d; cursor: not-allowed; }
+        .btn-green { background: #27ae60; width: 100%; margin-top: 10px; }
+        .btn-green:hover { background: #2ecc71; }
+
+        .record-board { margin-top: 20px; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 5px; min-height: 200px; }
+        .rank-item { display: flex; justify-content: space-between; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.1); font-size: 0.9em; }
+        .rank-1 { color: #f1c40f; font-weight: bold; }
+        .rank-2 { color: #bdc3c7; font-weight: bold; }
+        .rank-3 { color: #e67e22; font-weight: bold; }
+        #status-msg { height: 20px; font-weight: bold; text-align: center; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <div class="top-bar">
+        <span>닉네임:</span>
+        <input type="text" id="username" placeholder="기록용 이름">
+        <span>문제 번호(1~100):</span>
+        <input type="number" id="puzzle-selector" min="1" max="100" value="1">
+        <button onclick="loadSpecificPuzzle()">이동</button>
+    </div>
+
+    <div class="game-container">
+        <div class="board-wrapper">
+            <div id="game-board"></div>
+            <svg id="light-layer"></svg>
+        </div>
+
+        <div class="panel">
+            <h2 id="level-title" style="margin-top:0;">문제 1</h2>
+            <div id="status-msg">준비됨</div>
+            <p>남은 전구: <span id="bulb-count">0</span>개</p>
+            
+            <button onclick="checkAnswer()" id="btn-submit" class="btn-green">정답 확인</button>
+            <button onclick="nextPuzzle()" id="btn-next" style="display:none; background:#e67e22; width:100%; margin-top:10px;">다음 문제 ▶</button>
+
+            <div class="record-board">
+                <h3>🏆 명예의 전당 (현재 문제)</h3>
+                <div id="rank-list">로딩 중...</div>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // ==========================================
+    // [설정] Realtime Database Config
+    // ==========================================
+    const firebaseConfig = {
+      apiKey: "AIzaSyDP7WJoqi9hWXO27KaeY9Lvitj-5-E0j5Y",
+      authDomain: "bsar5-d7818.firebaseapp.com",
+      databaseURL: "https://bsar5-d7818-default-rtdb.firebaseio.com", // 이게 핵심!
+      projectId: "bsar5-d7818",
+      storageBucket: "bsar5-d7818.firebasestorage.app",
+      messagingSenderId: "377629207721",
+      appId: "1:377629207721:web:8b893496c0ac1749890db8",
+      measurementId: "G-M9FJXYTS3F"
+    };
+
+    // Firebase 초기화 (Realtime Database)
+    let db = null;
+    try {
+        if (firebaseConfig.apiKey) {
+            firebase.initializeApp(firebaseConfig);
+            db = firebase.database(); // .firestore()가 아니라 .database() 입니다
+            console.log("🔥 Realtime Database 연결 성공");
+        }
+    } catch (e) { 
+        console.error("Firebase 오류:", e); 
+        alert("DB 연결 실패. 콘솔을 확인하세요.");
+    }
+
+    // --- 전역 변수 ---
+    const N = 10; 
+    const SIZE = N + 2; 
+    const CELL_SIZE = 45; 
+    
+    let puzzles = [];
+    let currentPuzzle = null;
+    let userSelections = new Set(); 
+    let startTime = 0;
+    let isSolved = false;
+
+    const EMPTY=0, RED_SLASH=1, RED_BACKSLASH=2, BLUE_SLASH=3, BLUE_BACKSLASH=4;
+
+    window.onload = async function() {
+        try {
+            const response = await fetch('puzzles.json');
+            puzzles = await response.json();
+            console.log(`🧩 ${puzzles.length}개의 문제 로드 완료`);
+            loadSpecificPuzzle(); 
+        } catch (err) {
+            alert("puzzles.json 로드 실패!");
+        }
+    };
+
+    function loadSpecificPuzzle() {
+        const inputVal = document.getElementById('puzzle-selector').value;
+        let idx = parseInt(inputVal) - 1;
+        if (idx < 0) idx = 0;
+        if (idx >= puzzles.length) idx = puzzles.length - 1;
+
+        document.getElementById('puzzle-selector').value = idx + 1;
+        currentPuzzle = puzzles[idx];
+        isSolved = false;
+        userSelections.clear();
+        
+        document.getElementById('level-title').innerText = `문제 ${currentPuzzle.id}`;
+        document.getElementById('bulb-count').innerText = currentPuzzle.lights.length;
+        document.getElementById('status-msg').innerText = "출구를 찾아보세요!";
+        document.getElementById('status-msg').style.color = "white";
+        document.getElementById('btn-submit').style.display = 'inline-block';
+        document.getElementById('btn-next').style.display = 'none';
+
+        const svg = document.getElementById('light-layer');
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+        renderBoard();
+        loadRankings(currentPuzzle.id); // 랭킹 로드
+        startTime = new Date().getTime();
+    }
+
+    function nextPuzzle() {
+        const currentId = parseInt(document.getElementById('puzzle-selector').value);
+        if (currentId < puzzles.length) {
+            document.getElementById('puzzle-selector').value = currentId + 1;
+            loadSpecificPuzzle();
+        } else {
+            alert("완주를 축하합니다!");
+        }
+    }
+
+    function renderBoard() {
+        const board = document.getElementById('game-board');
+        board.innerHTML = '';
+        const grid = currentPuzzle.grid;
+        const lights = currentPuzzle.lights;
+        for (let r = 0; r < SIZE; r++) {
+            for (let c = 0; c < SIZE; c++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.dataset.r = r; cell.dataset.c = c;
+                if (r === 0 || r === SIZE - 1 || c === 0 || c === SIZE - 1) {
+                    if ((r===0 || r===SIZE-1) && (c===0 || c===SIZE-1)) cell.classList.add('corner');
+                    else {
+                        cell.classList.add('border');
+                        cell.onclick = () => toggleSelection(r, c);
+                        let label = "";
+                        if (c === 0 || c === SIZE - 1) label = String.fromCharCode(44032 + (r - 1));
+                        else if (r === 0 || r === SIZE - 1) label = String.fromCharCode(65 + (c - 1));
+                        cell.innerText = label;
+                    }
+                    if (lights.some(l => l.r === r && l.c === c)) {
+                        cell.innerHTML = '<span class="bulb">💡</span>';
+                        cell.classList.remove('border');
+                        cell.onclick = null;
+                    }
+                } else {
+                    const val = grid[r][c];
+                    if (val !== EMPTY) cell.appendChild(createMirrorSVG(val));
+                }
+                board.appendChild(cell);
+            }
+        }
+    }
+
+    function toggleSelection(r, c) {
+        if (isSolved) return; 
+        const key = `${r},${c}`;
+        const cell = document.querySelector(`.cell[data-r="${r}"][data-c="${c}"]`);
+        if (userSelections.has(key)) {
+            userSelections.delete(key);
+            cell.classList.remove('selected');
+        } else {
+            userSelections.add(key);
+            cell.classList.add('selected');
+        }
+    }
+
+    function createMirrorSVG(type) {
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("width", "100%"); svg.setAttribute("height", "100%"); svg.setAttribute("viewBox", "0 0 100 100");
+        const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+        line.setAttribute("class", "mirror-line");
+        if (type === RED_SLASH || type === BLUE_SLASH) {
+            line.setAttribute("x1", "100"); line.setAttribute("y1", "0"); line.setAttribute("x2", "0"); line.setAttribute("y2", "100");
+        } else {
+            line.setAttribute("x1", "0"); line.setAttribute("y1", "0"); line.setAttribute("x2", "100"); line.setAttribute("y2", "100");
+        }
+        if (type === RED_SLASH || type === RED_BACKSLASH) line.classList.add("mirror-red");
+        else line.classList.add("mirror-blue");
+        svg.appendChild(line);
+        return svg;
+    }
+
+    function checkAnswer() {
+        if (userSelections.size === 0) return alert("도착 지점을 선택하세요!");
+        const realAnswers = new Set(currentPuzzle.answers);
+        let correctCount = 0;
+        let isFail = false;
+        userSelections.forEach(key => {
+            const cell = document.querySelector(`.cell[data-r="${key.split(',')[0]}"][data-c="${key.split(',')[1]}"]`);
+            if (realAnswers.has(key)) {
+                correctCount++; cell.style.backgroundColor = "#27ae60";
+            } else {
+                isFail = true; cell.style.backgroundColor = "#e74c3c";
+            }
+        });
+        realAnswers.forEach(key => {
+             const [r, c] = key.split(',');
+             document.querySelector(`.cell[data-r="${r}"][data-c="${c}"]`).classList.add('answer-correct');
+        });
+        visualizeLightPath();
+
+        const status = document.getElementById('status-msg');
+        if (!isFail && correctCount === realAnswers.size) {
+            const endTime = new Date().getTime();
+            const clearTime = ((endTime - startTime) / 1000).toFixed(2);
+            status.innerText = `🎉 성공! (${clearTime}초)`;
+            status.style.color = "#f1c40f";
+            saveRecord(clearTime);
+            isSolved = true;
+            document.getElementById('btn-submit').style.display = 'none';
+            document.getElementById('btn-next').style.display = 'inline-block';
+        } else {
+            status.innerText = "오답입니다.";
+            status.style.color = "#e74c3c";
+        }
+    }
+
+    // ===============================================
+    // [중요] Realtime Database 연동 로직
+    // ===============================================
+    function saveRecord(time) {
+        if (!db) return;
+        const username = document.getElementById('username').value.trim() || "익명";
+        const puzzleId = currentPuzzle.id;
+
+        // DB구조: reflex_records -> 문제번호 -> (자동생성ID): {이름, 시간, 날짜}
+        // 이렇게 저장하면 문제별로 데이터를 긁어오기 매우 쉽습니다.
+        db.ref('reflex_records/' + puzzleId).push({
+            name: username,
+            time: parseFloat(time),
+            date: new Date().toISOString()
+        });
+    }
+
+    function loadRankings(puzzleId) {
+        const list = document.getElementById('rank-list');
+        list.innerHTML = "불러오는 중...";
+        
+        if (!db) { list.innerHTML = "DB 미연결"; return; }
+
+        // 해당 문제 번호 폴더 안에서 -> time 기준으로 정렬 -> 상위 10개만
+        db.ref('reflex_records/' + puzzleId)
+          .orderByChild('time')
+          .limitToFirst(10)
+          .once('value')
+          .then((snapshot) => {
+              list.innerHTML = "";
+              if (!snapshot.exists()) {
+                  list.innerHTML = "<div style='padding:10px; color:#ccc;'>기록이 없습니다.</div>";
+                  return;
+              }
+
+              let records = [];
+              snapshot.forEach((child) => {
+                  records.push(child.val());
+              });
+              // RTDB는 정렬된 데이터를 콜백함수로 주는데, 배열에 넣을 때 순서대로 들어옵니다.
+              
+              let rank = 1;
+              records.forEach((data) => {
+                  const item = document.createElement('div');
+                  item.className = "rank-item";
+                  let rankClass = "";
+                  if(rank === 1) rankClass = "rank-1";
+                  else if(rank === 2) rankClass = "rank-2";
+                  else if(rank === 3) rankClass = "rank-3";
+
+                  item.innerHTML = `
+                      <span class="${rankClass}">${rank}위 ${data.name}</span>
+                      <span>${data.time}초</span>
+                  `;
+                  list.appendChild(item);
+                  rank++;
+              });
+          });
+    }
+
+    function visualizeLightPath() {
+        const grid = currentPuzzle.grid;
+        const svg = document.getElementById('light-layer');
+        let queue = [];
+        let visited = new Set();
+        currentPuzzle.lights.forEach(l => { queue.push({ r: l.r, c: l.c, dr: l.dr, dc: l.dc }); });
+        while (queue.length > 0) {
+            let curr = queue.shift();
+            let r = curr.r, c = curr.c, dr = curr.dr, dc = curr.dc;
+            let nr = r + dr, nc = c + dc;
+            let startX = c*(CELL_SIZE+1)+(CELL_SIZE/2), startY = r*(CELL_SIZE+1)+(CELL_SIZE/2);
+            let endX = nc*(CELL_SIZE+1)+(CELL_SIZE/2), endY = nr*(CELL_SIZE+1)+(CELL_SIZE/2);
+            if (nr < 0 || nr >= SIZE || nc < 0 || nc >= SIZE) continue;
+            const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+            line.setAttribute("x1", startX); line.setAttribute("y1", startY);
+            line.setAttribute("x2", endX); line.setAttribute("y2", endY);
+            line.setAttribute("class", "beam");
+            svg.appendChild(line);
+            if (nr===0||nr===SIZE-1||nc===0||nc===SIZE-1) continue;
+            let cellType = grid[nr][nc];
+            let stateKey = `${nr},${nc},${dr},${dc}`;
+            if (visited.has(stateKey)) continue;
+            visited.add(stateKey);
+            if (cellType === EMPTY) queue.push({r:nr, c:nc, dr:dr, dc:dc});
+            else {
+                if(cellType===RED_SLASH) { queue.push({r:nr, c:nc, dr:-dc, dc:-dr}); }
+                else if(cellType===RED_BACKSLASH) { queue.push({r:nr, c:nc, dr:dc, dc:dr}); }
+                else if(cellType===BLUE_SLASH) { queue.push({r:nr, c:nc, dr:dr, dc:dc}); queue.push({r:nr, c:nc, dr:-dc, dc:-dr}); }
+                else if(cellType===BLUE_BACKSLASH) { queue.push({r:nr, c:nc, dr:dr, dc:dc}); queue.push({r:nr, c:nc, dr:dc, dc:dr}); }
+            }
+        }
+    }
+</script>
+</body>
+</html>
